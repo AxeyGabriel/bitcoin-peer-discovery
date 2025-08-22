@@ -19,21 +19,15 @@
 		}														\
 	} while(0)
 
-const uint8_t btc_msg_version_payload[] = {
-	0x7f, 0x11, 0x01, 0x00, 					//version (4 bytes, little-endian) = 70015
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// services (8 bytes) = 0
-	0xc0,0x9a,0x5b,0x5f,0x00,0x00,0x00,0x00,	// timestamp (8 bytes) = 0x5F5B9AC0 (example)
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: services (8 bytes) = 0
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: IPv6/IPv4 placeholder (16 bytes) all zeros
-	0x20,0x20,									// addr_recv: port (2 bytes) = 8333
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: services (8 bytes) = 0
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: IPv6/IPv4 placeholder (16 bytes) all zeros
-	0x20,0x20,									// addr_from: port (2 bytes) = 8333
-	0x2a,0x00,0x00,0x00,0x00,0x00,0x00,0x00		// nonce (8 bytes) = 42
-};
-const size_t btc_msg_version_payload_len = sizeof(btc_msg_version_payload);
+#define BTC_HDR_OFFSET_MAGIC		0
+#define BTC_HDR_OFFSET_CMD			4
+#define BTC_HDR_OFFSET_PAYLOAD_SIZE	16
+#define BTC_HDR_OFFSET_CHECKSUM		20
+#define BTC_HDR_SIZE				24
+#define BTC_HDR_CMD_SIZE			12
+
+#define BTC_VER_OFFSET_TIME 		12
+#define BTC_VER_OFFSET_ADDR_RECV 	20
 
 typedef struct
 {
@@ -41,13 +35,13 @@ typedef struct
 	size_t len;
 } blob_t;
 
-void blob_hexdump(blob_t *b) {
+void blob_hexdump(blob_t *b, int tx) {
 	uint8_t *data = b->data;
 	size_t len = b->len;
 
 	for (size_t i = 0; i < len; i += 16)
 	{
-		printf("%08zx  ", i);
+		printf("%s %08zx  ", tx ? "<" : ">>", i);
 		for (size_t j = 0; j < 16; j++)
 		{
 			if (i + j < len)
@@ -84,6 +78,40 @@ void btc_calculate_checksum(uint8_t *payload, size_t len, uint8_t *out)
 	memcpy(out, hash[1], 4);
 }
 
+blob_t *btc_create_version_payload(char *ip)
+{
+	static const uint8_t btc_msg_version_payload[] = {
+		0x7f, 0x11, 0x01, 0x00, 					//version (4 bytes, little-endian) = 70015
+		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// services (8 bytes) = 0
+		0xc0,0x9a,0x5b,0x5f,0x00,0x00,0x00,0x00,	// timestamp (8 bytes) = 0x5F5B9AC0 (example)
+		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: services (8 bytes) = 0
+		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: IPv6/IPv4 placeholder (16 bytes) all zeros
+		0x20,0x20,									// addr_recv: port (2 bytes) = 8333
+		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: services (8 bytes) = 0
+		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: IPv6/IPv4 placeholder (16 bytes) all zeros
+		0x20,0x20,									// addr_from: port (2 bytes) = 8333
+		0x2a,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// nonce (8 bytes) = 42
+		0x00,
+		0x00,0x00,0x00,0x00,
+		0x01,
+	};
+	static const size_t btc_msg_version_payload_len = sizeof(btc_msg_version_payload);
+	
+	uint8_t *data = malloc(btc_msg_version_payload_len);
+	blob_t *blob = malloc(sizeof(blob));
+	blob->data = data;
+	blob->len = btc_msg_version_payload_len;
+
+	memcpy(blob->data, btc_msg_version_payload, blob->len);
+
+	SERIALIZE_LE(time(NULL), blob->data + BTC_VER_OFFSET_TIME);
+	inet_pton(AF_INET, ip, blob->data + BTC_VER_OFFSET_ADDR_RECV);
+
+	return blob;
+}
+
 /*
  * Creates a binary blob containing the command
  * and the payload, already checksummed and ready
@@ -110,6 +138,7 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 	if (payload)
 	{
 		btc_calculate_checksum(payload, len, blob->data + offset);
+		memcpy(blob->data + offset, payload, len);
 	}
 	else
 	{
@@ -121,11 +150,14 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 
 int write_blob(int sockfd, blob_t *b)
 {
-	return write(sockfd, b->data, b->len);
+	blob_hexdump(b, 1);
+	int ret = write(sockfd, b->data, b->len);
+	//printf("sent %d bytes\n", b->len);
+	return ret;
 }
 
 
-int tcp_socket_connect(char *host, int port)
+int tcp_socket_connect(char *host, int port, char *resolved_ip)
 {
 	int sockfd;
 	struct sockaddr_in sa;
@@ -161,6 +193,7 @@ int tcp_socket_connect(char *host, int port)
 		
 		inet_ntop(p->ai_family, addr, ipstr, sizeof(ipstr));
 		printf("connecting to %s:%d ...\n", ipstr, port);
+		strcpy(resolved_ip, ipstr);
 
 		sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 		if (sockfd == -1) continue;
@@ -197,38 +230,90 @@ int main(int argc, char **argv)
 	printf("Bitcoin peer discovery poc\n"
 		"using peer \"%s\" as the root peer\n", pa);
 
-	sockfd = tcp_socket_connect(pa, pp);
+	char resolved_ip[INET6_ADDRSTRLEN];
+	sockfd = tcp_socket_connect(pa, pp, resolved_ip);
 
+	blob_t *btc_msg_version_payload = btc_create_version_payload(resolved_ip);
 	blob_t *btc_msg_version = btc_create_msg("version",
-			(uint8_t *)& btc_msg_version_payload, btc_msg_version_payload_len);
-	
+			btc_msg_version_payload->data, btc_msg_version_payload->len);
 	blob_t *btc_msg_verack = btc_create_msg("verack", NULL, 0);
-	
 	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
 	
-	printf("\nDumping generated \"version\" packet\n");
-	blob_hexdump(btc_msg_version);
-	printf("\nDumping generated \"verack\" packet\n");
-	blob_hexdump(btc_msg_verack);
-	printf("\nDumping generated \"getaddr\" packet\n");
-	blob_hexdump(btc_msg_getaddr);
 
-
-	blob_t recv;
-	uint8_t buf[2048];
-	recv.data = (uint8_t *)&buf;
+	uint8_t buf[8192];
+	size_t buf_len = sizeof(buf);
+	size_t offset = 0;
 
 	write_blob(sockfd, btc_msg_version);
-    recv.len  = read(sockfd, buf, sizeof(buf));
-	printf("Got %d bytes (version)\n", recv.len);
-	printf("\nDumping received \"version\" packet\n");
-	blob_hexdump(&recv);
 
-	write_blob(sockfd, btc_msg_verack);
-    recv.len  = read(sockfd, buf, sizeof(buf));
-	printf("Got %d bytes (verack)\n", recv.len);
-	printf("\nDumping received \"version\" packet\n");
-	blob_hexdump(&recv);
+	while (1)
+	{
+		ssize_t n = read(sockfd, buf + offset, buf_len - offset);
+		if (n == 0)
+		{
+			puts("read: eof");
+			break;
+		}
+		else if (n == -1)
+		{
+			perror("read");
+			break;
+		}
+		offset += n;
+		size_t pos = 0;
+		while (offset - pos >= BTC_HDR_SIZE)
+		{
+			uint32_t payload_len = *(uint32_t *)(buf + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
+			if (offset - pos < payload_len + BTC_HDR_SIZE)
+			{
+				break;
+			}
+
+			uint8_t *cmd = buf + pos + BTC_HDR_OFFSET_CMD;
+			uint8_t *p = buf + pos + BTC_HDR_SIZE;
+
+			blob_t blob;
+			blob.data = buf + pos;
+			blob.len = payload_len + BTC_HDR_SIZE;
+			blob_hexdump(&blob, 0);
+	
+			if(!strncmp(cmd, "version", BTC_HDR_CMD_SIZE))
+			{
+				write_blob(sockfd, btc_msg_verack);
+			}
+			else if(!strncmp(cmd, "verack", BTC_HDR_CMD_SIZE))
+			{
+				write_blob(sockfd, btc_msg_getaddr);
+			}
+			else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
+			{
+				puts("received addr");
+			}
+			else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
+			{
+				puts("received addrv2");
+			}
+			else if(!strncmp(cmd, "ping", BTC_HDR_CMD_SIZE))
+			{
+				blob_t *btc_msg_pong = btc_create_msg("pong", p, payload_len);
+				write_blob(sockfd, btc_msg_pong);
+				free(btc_msg_pong->data);
+				free(btc_msg_pong);
+			}
+			else
+			{
+				puts("received unknown msg");
+			}
+
+			pos += payload_len + 24;
+		}
+
+		if (pos > 0)
+		{
+			memmove(buf, buf + pos, offset - pos);
+			offset -= pos;
+		}
+	}
 
 	close(sockfd);
 	puts("disconnected");
