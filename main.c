@@ -13,6 +13,8 @@
 #include <openssl/sha.h>
 #include "cJSON.h"
 
+#define PEERS_IPV4_ONLY
+
 #define SERIALIZE_LE(val, buf) 									\
 	do {														\
 		for (size_t i = 0; i < sizeof((val)); i++) {			\
@@ -36,6 +38,75 @@ typedef struct
 	uint8_t *data;
 	size_t len;
 } blob_t;
+
+typedef struct peer_s
+{
+	uint8_t ip[16];
+	uint16_t port;
+	uint64_t key;
+	struct peer_s *left;
+	struct peer_s *right;
+} peer_t;
+
+uint64_t hash_peer_info(uint8_t *ip, uint16_t port)
+{
+	uint64_t hash = 0;
+	for (int i = 0; i < 16; i++)
+	{
+		hash *= 31;
+		hash += ip[i];
+	}
+
+	hash *= 31;
+	hash += port;
+
+	return hash;
+}
+
+peer_t *create_peer(uint8_t *ip, uint16_t port)
+{
+	peer_t *p = malloc(sizeof(peer_t));
+	memcpy(p->ip, ip, 16);
+	p->port = port;
+	p->key = hash_peer_info(ip, port);
+	p->left = NULL;
+	p->right = NULL;
+	return p;
+}
+
+peer_t *insert_peer(peer_t *root, peer_t *new)
+{
+	if (root == NULL)
+	{
+		return new;
+	}
+
+	if (new->key < root->key) 		root->left = insert_peer(root->left, new);
+	else if (new->key > root->key) 	root->right = insert_peer(root->right, new);
+
+	return root;
+}
+
+void dump_peers_tree(peer_t *root)
+{
+    uint8_t str[INET6_ADDRSTRLEN];
+
+	if (!root) return;
+	dump_peers_tree(root->left);
+
+	if (IN6_IS_ADDR_V4MAPPED((struct in6_addr *)root->ip))
+	{
+		inet_ntop(AF_INET, root->ip + 12, str, sizeof(str));
+	}
+	else
+	{
+		inet_ntop(AF_INET6, root->ip, str, sizeof(str));
+	}
+	
+	printf("peer %016llx: ip %s port %d\n", root->key, str, root->port);
+
+	dump_peers_tree(root->right);
+}
 
 void blob_hexdump(blob_t *b, int tx) {
 	uint8_t *data = b->data;
@@ -65,6 +136,39 @@ void blob_hexdump(blob_t *b, int tx) {
 		}
 
 		puts("");
+	}
+}
+
+void btc_parse_addr(blob_t *buf, peer_t **root)
+{
+	uint8_t *payload = buf->data + BTC_HDR_SIZE;
+	uint32_t len = buf->len - BTC_HDR_SIZE;
+
+	uint16_t ip_count = payload[0];
+	uint16_t offset = 1;
+
+	if (payload[0] == 0xFD)
+	{
+		ip_count = (payload[2] << 8) | payload[1];
+		offset = 3;
+	}
+
+	while(ip_count-- && offset+26 <= len)
+	{
+		offset += 12;
+		uint8_t *ip = payload + offset;
+		offset += 16;
+		uint16_t port = (payload[offset] << 8) | payload[offset + 1];
+		offset += 2;
+#ifdef PEERS_IPV4_ONLY
+		if (IN6_IS_ADDR_V4MAPPED((struct in6_addr *)ip))
+		{
+#endif
+			peer_t *peer = create_peer(ip, port);
+			*root = insert_peer(*root, peer);
+#ifdef PEERS_IPV4_ONLY
+		}
+#endif
 	}
 }
 
@@ -261,10 +365,13 @@ int main(int argc, char **argv)
 	uint8_t buf[32768];
 	size_t buf_len = sizeof(buf);
 	size_t offset = 0;
+	int keep_reading = 1;
 
 	write_blob(sockfd, btc_msg_version);
 
-	while (1)
+	peer_t *peers = NULL;
+
+	while (keep_reading)
 	{
 		ssize_t n = read(sockfd, buf + offset, buf_len - offset);
 		if (n == 0)
@@ -278,7 +385,6 @@ int main(int argc, char **argv)
 			break;
 		}
 
-		printf("received %d bytes\n", n);
 		offset += n;
 		size_t pos = 0;
 		while (offset - pos >= BTC_HDR_SIZE)
@@ -307,7 +413,8 @@ int main(int argc, char **argv)
 			}
 			else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
 			{
-				puts("received addr");
+				btc_parse_addr(&blob, &peers);
+				keep_reading = 0;
 			}
 			else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
 			{
@@ -315,10 +422,12 @@ int main(int argc, char **argv)
 			}
 			else if(!strncmp(cmd, "ping", BTC_HDR_CMD_SIZE))
 			{
+/*
 				blob_t *btc_msg_pong = btc_create_msg("pong", p, payload_len);
 				write_blob(sockfd, btc_msg_pong);
 				free(btc_msg_pong->data);
 				free(btc_msg_pong);
+*/
 			}
 			else
 			{
@@ -333,6 +442,15 @@ int main(int argc, char **argv)
 			memmove(buf, buf + pos, offset - pos);
 			offset -= pos;
 		}
+	}
+
+	if (peers)
+	{
+		dump_peers_tree(peers);
+	}
+	else
+	{
+		puts("no peers found");
 	}
 
 	close(sockfd);
