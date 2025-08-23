@@ -193,15 +193,6 @@ int main(int argc, char **argv)
 			{
 				puts("received addrv2");
 			}
-			else if(!strncmp(cmd, "ping", BTC_HDR_CMD_SIZE))
-			{
-/*
-				blob_t *btc_msg_pong = btc_create_msg("pong", p, payload_len);
-				write_blob(sockfd, btc_msg_pong);
-				free(btc_msg_pong->data);
-				free(btc_msg_pong);
-*/
-			}
 			else
 			{
 				puts("received unknown msg");
