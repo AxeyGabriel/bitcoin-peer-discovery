@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -14,7 +15,7 @@
 
 #define SERIALIZE_LE(val, buf) 									\
 	do {														\
-		for (size_t i = 0; i < sizeof(val); i++) {				\
+		for (size_t i = 0; i < sizeof((val)); i++) {			\
 			((uint8_t *)(buf))[i] = ((val) >> (8*i)) & 0xFF;	\
 		}														\
 	} while(0)
@@ -26,8 +27,9 @@
 #define BTC_HDR_SIZE				24
 #define BTC_HDR_CMD_SIZE			12
 
+#define BTC_VER_OFFSET_VERSION 		0
 #define BTC_VER_OFFSET_TIME 		12
-#define BTC_VER_OFFSET_ADDR_RECV 	20
+#define BTC_MSG_VERSION_SIZE		86
 
 typedef struct
 {
@@ -80,34 +82,13 @@ void btc_calculate_checksum(uint8_t *payload, size_t len, uint8_t *out)
 
 blob_t *btc_create_version_payload(char *ip)
 {
-	static const uint8_t btc_msg_version_payload[] = {
-		0x7f, 0x11, 0x01, 0x00, 					//version (4 bytes, little-endian) = 70015
-		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// services (8 bytes) = 0
-		0xc0,0x9a,0x5b,0x5f,0x00,0x00,0x00,0x00,	// timestamp (8 bytes) = 0x5F5B9AC0 (example)
-		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: services (8 bytes) = 0
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_recv: IPv6/IPv4 placeholder (16 bytes) all zeros
-		0x20,0x20,									// addr_recv: port (2 bytes) = 8333
-		0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: services (8 bytes) = 0
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// addr_from: IPv6/IPv4 placeholder (16 bytes) all zeros
-		0x20,0x20,									// addr_from: port (2 bytes) = 8333
-		0x2a,0x00,0x00,0x00,0x00,0x00,0x00,0x00,	// nonce (8 bytes) = 42
-		0x00,
-		0x00,0x00,0x00,0x00,
-		0x01,
-	};
-	static const size_t btc_msg_version_payload_len = sizeof(btc_msg_version_payload);
-	
-	uint8_t *data = malloc(btc_msg_version_payload_len);
-	blob_t *blob = malloc(sizeof(blob));
-	blob->data = data;
-	blob->len = btc_msg_version_payload_len;
+	blob_t *blob = malloc(sizeof(blob_t));
+	blob->data = malloc(BTC_MSG_VERSION_SIZE);
+	blob->len = BTC_MSG_VERSION_SIZE;
+	memset(blob->data, 0, BTC_MSG_VERSION_SIZE);
 
-	memcpy(blob->data, btc_msg_version_payload, blob->len);
-
-	SERIALIZE_LE(time(NULL), blob->data + BTC_VER_OFFSET_TIME);
-	inet_pton(AF_INET, ip, blob->data + BTC_VER_OFFSET_ADDR_RECV);
+	SERIALIZE_LE((uint32_t)70015, blob->data + BTC_VER_OFFSET_VERSION);
+	SERIALIZE_LE((uint64_t)time(NULL), blob->data + BTC_VER_OFFSET_TIME);
 
 	return blob;
 }
@@ -123,12 +104,12 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 	const int hdr_size = 24;
 	char *empty_str = "";
 	size_t offset = 0;
-	uint8_t header[hdr_size];
-	blob_t *blob = malloc(sizeof(blob));
+	
+	blob_t *blob = malloc(sizeof(blob_t));
 	blob->len = hdr_size + len;
 	blob->data = malloc(blob->len);
 	memset(blob->data, 0, blob->len);
-	SERIALIZE_LE(hdr_magic, blob->data + offset);
+	SERIALIZE_LE((uint32_t)hdr_magic, blob->data + offset);
 	offset += 4;
 	strncpy(blob->data + offset, cmd, strlen(cmd));
 	offset += 12;
@@ -138,6 +119,7 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 	if (payload)
 	{
 		btc_calculate_checksum(payload, len, blob->data + offset);
+		offset += 4;
 		memcpy(blob->data + offset, payload, len);
 	}
 	else
@@ -198,14 +180,50 @@ int tcp_socket_connect(char *host, int port, char *resolved_ip)
 		sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 		if (sockfd == -1) continue;
 
-		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1)
+		int flags = fcntl(sockfd, F_GETFL, 0);
+		fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+		int ret = connect(sockfd, p->ai_addr, p->ai_addrlen);
+		if (ret == 0)
 		{
-			perror("failed to connect");
+			goto connected;
+		}
+		else if (errno != EINPROGRESS)
+		{
+			perror("connect");
 			close(sockfd);
 			continue;
 		}
 
-		printf("connected\n");
+		fd_set wfds;
+		FD_ZERO(&wfds);
+		FD_SET(sockfd, &wfds);
+
+		struct timeval tv;
+		tv.tv_sec = 3;
+		tv.tv_usec = 0;
+
+		ret = select(sockfd + 1, NULL, &wfds, NULL, &tv);
+		if (ret <= 0)
+		{
+			puts("connection timed out");
+			continue;
+		}
+
+		int so_err;
+		socklen_t so_len = sizeof(so_err);
+		getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &so_err, &so_len);
+		if (so_err != 0)
+		{
+			errno = so_err;
+			perror("getsockopt");
+			close(sockfd);
+			continue;
+		}
+
+connected:
+		fcntl(sockfd, F_SETFL, flags);
+		puts("connected");
 		freeaddrinfo(res);
 		return sockfd;
 	}
@@ -240,7 +258,7 @@ int main(int argc, char **argv)
 	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
 	
 
-	uint8_t buf[8192];
+	uint8_t buf[32768];
 	size_t buf_len = sizeof(buf);
 	size_t offset = 0;
 
@@ -259,6 +277,8 @@ int main(int argc, char **argv)
 			perror("read");
 			break;
 		}
+
+		printf("received %d bytes\n", n);
 		offset += n;
 		size_t pos = 0;
 		while (offset - pos >= BTC_HDR_SIZE)
