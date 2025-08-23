@@ -51,7 +51,7 @@ static void btc_calculate_checksum(uint8_t *payload, size_t len, uint8_t *out)
 	memcpy(out, hash[1], 4);
 }
 
-blob_t *btc_create_version_payload(char *ip)
+blob_t *btc_create_version_payload(void)
 {
 	blob_t *blob = malloc(sizeof(blob_t));
 	blob->data = malloc(BTC_MSG_VERSION_SIZE);
