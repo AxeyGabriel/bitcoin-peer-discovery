@@ -9,30 +9,38 @@
 #include "cJSON.h"
 #include "netutils.h"
 
-#define MAX_FDS 1024
+#define MAX_FDS 2048
 	
 peer_t *peers = NULL;
 
-struct pollfd pollfds[MAX_FDS];
-struct pollfd pollsockfd;
-int nfds = 0;
+uint8_t buf[32768][MAX_FDS];
 peer_t *peer_info[MAX_FDS];
+int connected = 0;
+struct pollfd pollfds[MAX_FDS];
+int nfds = 0;
 
-int add_peer_socket(int sockfd, peer_t *peer)
+void connect_to_peer(peer_t *p)
 {
-	if (nfds >= MAX_FDS)	return -1;
+	if (nfds >= MAX_FDS) return;
+	if (p->queried) return;
+	if (p->sockfd > 0) return;
+
+	int sockfd = tcp_socket_connect_v4mapped_nb(&p->addr, p->port);
+
 	pollfds[nfds].fd = sockfd;
 	pollfds[nfds].events = POLLIN | POLLOUT;
 	pollfds[nfds].revents = 0;
-	peer_info[nfds] = peer;
+	peer_info[nfds] = p;
+	p->sockfd = sockfd;
+	p->queried = 1;
 	nfds++;
-	return 0;
+	connected++;
 }
 
 
 int main(int argc, char **argv)
 {
-	int sockfd, status;
+	int status;
 	char *pa = argv[1];
 	int pp = atoi(argv[2]);
 	int npeers = atoi(argv[3]);
@@ -58,29 +66,11 @@ int main(int argc, char **argv)
 	unsigned int total_peers = 0;
 	total_peers += resolve_names_and_add_peers(pa, pp, &peers);  	
 	
-	peer_t *peer;
-	dump_peers_tree(peers);
-	while((peer = find_unqueried(peers)) != NULL)
-	{
-		int sockfd = tcp_socket_connect_v4mapped_nb(&peer->addr, peer->port);
-		add_peer_socket(sockfd, peer);
-	}
-	exit(1);
-
+	traverse_peers(peers, connect_to_peer);
 	
-	uint8_t peer_flags = 0;
-#define PEER_FLAG_GOT_VERSION	(1 << 0)
-#define PEER_FLAG_GOT_VERACK	(1 << 1)
-#define PEER_FLAG_SENT_VERSION	(1 << 2)
-#define PEER_FLAG_SENT_VERACK	(1 << 3)
-#define PEER_FLAG_SENT_GETADDR	(1 << 4)
-
-	
-	uint8_t buf[32768];
 	size_t buf_len = sizeof(buf);
-	size_t offset = 0;
 
-	while (total_peers < 10)
+	while (total_peers < npeers && nfds > 0)
 	{
 		int ret = poll(pollfds, nfds, 3000);
 		int len = sizeof(ret);
@@ -92,97 +82,106 @@ int main(int argc, char **argv)
 
 		for (int fd = 0; fd < nfds; fd++)
 		{
+			peer_t *peer = peer_info[fd];
 			if (pollfds[fd].revents & (POLLERR | POLLHUP | POLLNVAL))
 			{
 				sock_close(pollfds[fd].fd);
 				pollfds[fd] = pollfds[nfds - 1];
+				peer_info[fd] = peer_info[nfds - 1];
 				nfds--;
 				fd--;
+				connected--;
 				continue;
-			}	
+			}
+
+			if (pollfds[fd].revents & POLLOUT)
+			{
+				if (!(peer->flags & PEER_FLAG_SENT_VERSION))
+				{
+					write_blob(peer->sockfd, btc_msg_version);
+					peer->flags |= PEER_FLAG_SENT_VERSION;
+				}
+				else if ((peer->flags & PEER_FLAG_GOT_VERSION)
+					&& !(peer->flags & PEER_FLAG_SENT_VERACK))
+				{
+					write_blob(peer->sockfd, btc_msg_verack);
+					peer->flags |= PEER_FLAG_SENT_VERACK;
+				}
+				else if ((peer->flags & PEER_FLAG_GOT_VERACK)
+					&& !(peer->flags & PEER_FLAG_SENT_GETADDR))
+				{
+					write_blob(peer->sockfd, btc_msg_getaddr);
+					peer->flags |= PEER_FLAG_SENT_GETADDR;
+				}
+			}
+
+			if (pollfds[fd].revents & POLLIN)
+			{
+				ssize_t n = sock_read(peer->sockfd, buf[fd] + peer->offset, buf_len - peer->offset);
+				if (n == 0)
+				{
+					continue;
+				}
+				else if (n == -1)
+				{
+					perror("read");
+					continue;
+				}
+
+				peer->offset += n;
+				size_t pos = 0;
+				while (peer->offset - pos >= BTC_HDR_SIZE)
+				{
+					uint32_t payload_len = *(uint32_t *)(buf[fd] + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
+					if (peer->offset - pos < payload_len + BTC_HDR_SIZE)
+					{
+						break;
+					}
+		
+					uint8_t *cmd = buf[fd] + pos + BTC_HDR_OFFSET_CMD;
+					uint8_t *p = buf[fd] + pos + BTC_HDR_SIZE;
+		
+					blob_t blob;
+					blob.data = buf[fd] + pos;
+					blob.len = payload_len + BTC_HDR_SIZE;
+					//blob_hexdump(&blob, 0);
+					
+					if(!strncmp(cmd, "version", BTC_HDR_CMD_SIZE))
+					{
+						peer->flags |= PEER_FLAG_GOT_VERSION;
+					}
+					else if(!strncmp(cmd, "verack", BTC_HDR_CMD_SIZE))
+					{
+						peer->flags |= PEER_FLAG_GOT_VERACK;
+					}
+					else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
+					{
+						total_peers += btc_parse_addr(&blob, &peers);
+						printf("%d peers - %d connections\n", total_peers, connected);	
+						sock_close(peer->sockfd);
+						pollfds[fd] = pollfds[nfds - 1];
+						peer_info[fd] = peer_info[nfds - 1];
+						nfds--;
+						fd--;
+						connected--;
+					}
+					else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
+					{
+						puts("received addrv2");
+					}
+		
+					pos += payload_len + 24;
+				}
+
+				if (pos > 0)
+				{
+					memmove(buf[fd], buf[fd] + pos, peer->offset - pos);
+					peer->offset -= pos;
+				}
+			}
 		}
 
-		if (pollsockfd.revents & POLLOUT)
-		{
-			if (!(peer_flags & PEER_FLAG_SENT_VERSION))
-			{
-				write_blob(sockfd, btc_msg_version);
-				peer_flags |= PEER_FLAG_SENT_VERSION;
-			}
-			else if ((peer_flags & PEER_FLAG_GOT_VERSION)
-				&& !(peer_flags & PEER_FLAG_SENT_VERACK))
-			{
-				write_blob(sockfd, btc_msg_verack);
-				peer_flags |= PEER_FLAG_SENT_VERACK;
-			}
-			else if ((peer_flags & PEER_FLAG_GOT_VERACK)
-				&& !(peer_flags & PEER_FLAG_SENT_GETADDR))
-			{
-				write_blob(sockfd, btc_msg_getaddr);
-				peer_flags |= PEER_FLAG_SENT_GETADDR;
-			}
-		}
-
-		if (pollsockfd.revents & POLLIN)
-		{
-			ssize_t n = sock_read(sockfd, buf + offset, buf_len - offset);
-			if (n == 0)
-			{
-				puts("read: eof");
-				break;
-			}
-			else if (n == -1)
-			{
-				perror("read");
-				break;
-			}
-
-			offset += n;
-			size_t pos = 0;
-			while (offset - pos >= BTC_HDR_SIZE)
-			{
-				uint32_t payload_len = *(uint32_t *)(buf + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
-				if (offset - pos < payload_len + BTC_HDR_SIZE)
-				{
-					break;
-				}
-	
-				uint8_t *cmd = buf + pos + BTC_HDR_OFFSET_CMD;
-				uint8_t *p = buf + pos + BTC_HDR_SIZE;
-	
-				blob_t blob;
-				blob.data = buf + pos;
-				blob.len = payload_len + BTC_HDR_SIZE;
-				blob_hexdump(&blob, 0);
-				
-				if(!strncmp(cmd, "version", BTC_HDR_CMD_SIZE))
-				{
-					peer_flags |= PEER_FLAG_GOT_VERSION;
-				}
-				else if(!strncmp(cmd, "verack", BTC_HDR_CMD_SIZE))
-				{
-					peer_flags |= PEER_FLAG_GOT_VERACK;
-				}
-				else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
-				{
-					total_peers += btc_parse_addr(&blob, &peers);
-					sock_close(sockfd);
-					puts("disconnected");
-				}
-				else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
-				{
-					puts("received addrv2");
-				}
-	
-				pos += payload_len + 24;
-			}
-
-			if (pos > 0)
-			{
-				memmove(buf, buf + pos, offset - pos);
-				offset -= pos;
-			}
-		}
+		traverse_peers(peers, connect_to_peer);
 	}
 
 	if (peers)

@@ -28,6 +28,9 @@ peer_t *create_peer(struct in6_addr *addr, uint16_t port)
 	p->port = port;
 	p->key = hash_peer_info(addr, port);
 	p->queried = 0;
+	p->sockfd = 0;
+	p->flags = 0;
+	p->offset = 0;
 	p->left = NULL;
 	p->right = NULL;
 	return p;
@@ -49,13 +52,14 @@ peer_t *insert_peer(peer_t *root, peer_t *new, uint8_t *duplicated)
 	return root;
 }
 
-peer_t* find_unqueried(peer_t *root)
+void traverse_peers(peer_t *root, peer_callback_t cb)
 {
-	if (!root) 			return NULL;
-	if (!root->queried) return root;
-	peer_t *left = 		find_unqueried(root->left);
-	if (left) 			return left;
-	return 				find_unqueried(root->right);
+	if (!root) return;
+	
+	cb(root);
+	
+	traverse_peers(root->left, cb);
+	traverse_peers(root->right, cb);
 }
 
 void dump_peers_tree(peer_t *root)
@@ -74,7 +78,7 @@ void dump_peers_tree(peer_t *root)
 		inet_ntop(AF_INET6, root->addr.s6_addr, str, sizeof(str));
 	}
 	
-	printf("peer %016llx: ip %s port %d\n", root->key, str, root->port);
+	printf("peer %016lx: ip %s port %d\n", root->key, str, root->port);
 
 	dump_peers_tree(root->right);
 }

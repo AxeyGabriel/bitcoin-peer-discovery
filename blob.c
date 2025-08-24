@@ -37,7 +37,7 @@ void blob_hexdump(blob_t *b, int tx)
 
 int write_blob(int sockfd, blob_t *b)
 {
-	blob_hexdump(b, 1);
+	//blob_hexdump(b, 1);
 	int ret = write(sockfd, b->data, b->len);
 	//printf("sent %d bytes\n", b->len);
 	return ret;
