@@ -9,13 +9,33 @@
 #include "cJSON.h"
 #include "netutils.h"
 
+#define MAX_FDS 1024
+	
+peer_t *peers = NULL;
+
+struct pollfd pollfds[MAX_FDS];
+struct pollfd pollsockfd;
+int nfds = 0;
+peer_t *peer_info[MAX_FDS];
+
+int add_peer_socket(int sockfd, peer_t *peer)
+{
+	if (nfds >= MAX_FDS)	return -1;
+	pollfds[nfds].fd = sockfd;
+	pollfds[nfds].events = POLLIN | POLLOUT;
+	pollfds[nfds].revents = 0;
+	peer_info[nfds] = peer;
+	nfds++;
+	return 0;
+}
+
+
 int main(int argc, char **argv)
 {
 	int sockfd, status;
 	char *pa = argv[1];
 	int pp = atoi(argv[2]);
 	int npeers = atoi(argv[3]);
-	struct pollfd pollsockfd;
 	
 	if (argc < 3)
 	{
@@ -26,11 +46,28 @@ int main(int argc, char **argv)
 	printf("Bitcoin peer discovery poc\n"
 		"using peer \"%s\" as the root peer\n", pa);
 
-	sockfd = socket_resolve_and_connect(pa, pp, 3);
-	pollsockfd.fd = sockfd;
-	pollsockfd.events = POLLIN | POLLOUT;
-	pollsockfd.revents = 0;
+	/*
+ 	 * Pre allocate all needed messages
+ 	 */	
+	blob_t *btc_msg_version_payload = btc_create_version_payload();
+	blob_t *btc_msg_version = btc_create_msg("version",
+			btc_msg_version_payload->data, btc_msg_version_payload->len);
+	blob_t *btc_msg_verack = btc_create_msg("verack", NULL, 0);
+	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
 
+	unsigned int total_peers = 0;
+	total_peers += resolve_names_and_add_peers(pa, pp, &peers);  	
+	
+	peer_t *peer;
+	dump_peers_tree(peers);
+	while((peer = find_unqueried(peers)) != NULL)
+	{
+		int sockfd = tcp_socket_connect_v4mapped_nb(&peer->addr, peer->port);
+		add_peer_socket(sockfd, peer);
+	}
+	exit(1);
+
+	
 	uint8_t peer_flags = 0;
 #define PEER_FLAG_GOT_VERSION	(1 << 0)
 #define PEER_FLAG_GOT_VERACK	(1 << 1)
@@ -38,22 +75,14 @@ int main(int argc, char **argv)
 #define PEER_FLAG_SENT_VERACK	(1 << 3)
 #define PEER_FLAG_SENT_GETADDR	(1 << 4)
 
-	blob_t *btc_msg_version_payload = btc_create_version_payload();
-	blob_t *btc_msg_version = btc_create_msg("version",
-			btc_msg_version_payload->data, btc_msg_version_payload->len);
-	blob_t *btc_msg_verack = btc_create_msg("verack", NULL, 0);
-	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
 	
 	uint8_t buf[32768];
 	size_t buf_len = sizeof(buf);
 	size_t offset = 0;
-	int keep_reading = 1;
 
-
-	peer_t *peers = NULL;
-	while (keep_reading)
+	while (total_peers < 10)
 	{
-		int ret = poll(&pollsockfd, 1, 3000);
+		int ret = poll(pollfds, nfds, 3000);
 		int len = sizeof(ret);
 		if (ret < 0)
 		{
@@ -61,11 +90,16 @@ int main(int argc, char **argv)
 			break;
 		}
 
-		if (pollsockfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+		for (int fd = 0; fd < nfds; fd++)
 		{
-			sock_close(pollsockfd.fd);
-			puts("pollerr | pollhup | pollnval");
-			break;
+			if (pollfds[fd].revents & (POLLERR | POLLHUP | POLLNVAL))
+			{
+				sock_close(pollfds[fd].fd);
+				pollfds[fd] = pollfds[nfds - 1];
+				nfds--;
+				fd--;
+				continue;
+			}	
 		}
 
 		if (pollsockfd.revents & POLLOUT)
@@ -91,7 +125,6 @@ int main(int argc, char **argv)
 
 		if (pollsockfd.revents & POLLIN)
 		{
-
 			ssize_t n = sock_read(sockfd, buf + offset, buf_len - offset);
 			if (n == 0)
 			{
@@ -132,16 +165,13 @@ int main(int argc, char **argv)
 				}
 				else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
 				{
-					btc_parse_addr(&blob, &peers);
-					keep_reading = 0;
+					total_peers += btc_parse_addr(&blob, &peers);
+					sock_close(sockfd);
+					puts("disconnected");
 				}
 				else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
 				{
 					puts("received addrv2");
-				}
-				else
-				{
-					puts("received unknown msg");
 				}
 	
 				pos += payload_len + 24;
@@ -158,14 +188,13 @@ int main(int argc, char **argv)
 	if (peers)
 	{
 		dump_peers_tree(peers);
+		printf("discovered %d peers\n", total_peers);
 	}
 	else
 	{
 		puts("no peers found");
 	}
 
-	sock_close(sockfd);
-	puts("disconnected");
 	
 	return 0;
 }

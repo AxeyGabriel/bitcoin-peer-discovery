@@ -6,13 +6,14 @@
 #include "common.h"
 #include "btc.h"
 
-void btc_parse_addr(blob_t *buf, peer_t **root)
+int btc_parse_addr(blob_t *buf, peer_t **root)
 {
 	uint8_t *payload = buf->data + BTC_HDR_SIZE;
 	uint32_t len = buf->len - BTC_HDR_SIZE;
 
 	uint16_t ip_count = payload[0];
 	uint16_t offset = 1;
+	uint16_t n_inserted = 0;
 
 	if (payload[0] == 0xFD)
 	{
@@ -31,12 +32,16 @@ void btc_parse_addr(blob_t *buf, peer_t **root)
 		if (IN6_IS_ADDR_V4MAPPED((struct in6_addr *)ip))
 		{
 #endif
-			peer_t *peer = create_peer(ip, port);
-			*root = insert_peer(*root, peer);
+			uint8_t duplicated = 0;
+			peer_t *peer = create_peer((struct in6_addr *)ip, port);
+			*root = insert_peer(*root, peer, &duplicated);
+			if (!duplicated) n_inserted++;
 #ifdef PEERS_IPV4_ONLY
 		}
 #endif
 	}
+
+	return n_inserted;
 }
 
 /*
