@@ -12,7 +12,7 @@
 
 #include "common.h"
 
-int tcp_socket_connect(char *host, int port)
+int socket_resolve_and_connect(char *host, int port, int timeout)
 {
 	int sockfd;
 	struct sockaddr_in sa;
@@ -72,7 +72,7 @@ int tcp_socket_connect(char *host, int port)
 		FD_SET(sockfd, &wfds);
 
 		struct timeval tv;
-		tv.tv_sec = 3;
+		tv.tv_sec = timeout;
 		tv.tv_usec = 0;
 
 		ret = select(sockfd + 1, NULL, &wfds, NULL, &tv);
@@ -94,7 +94,7 @@ int tcp_socket_connect(char *host, int port)
 		}
 
 connected:
-		fcntl(sockfd, F_SETFL, flags);
+		//fcntl(sockfd, F_SETFL, flags);
 		puts("connected");
 		freeaddrinfo(res);
 		return sockfd;
@@ -103,6 +103,43 @@ connected:
 	printf("all options failed. exiting\n");
 	freeaddrinfo(res);
 	exit(1);
+}
+
+int tcp_socket_connect_v4mapped_nb(char *ip, int port)
+{
+	int sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+	if (sockfd < 0)
+	{
+		perror("socket");
+		return -1;
+	}
+
+	int flags = fcntl(sockfd, F_GETFL, 0);
+	fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+	struct sockaddr_in6 sa6;
+	memset(&sa6, 0, sizeof(sa6));
+	sa6.sin6_family = AF_INET6;
+	sa6.sin6_port = htons(port);
+
+	if (inet_pton(AF_INET6, ip, &sa6.sin6_addr) != 1)
+	{
+		perror("inet_pton");
+		close(sockfd);
+		return -1;
+	}
+
+	if (connect(sockfd, (struct sockaddr *)&sa6, sizeof(sa6)) < 0)
+	{
+		if (errno != EINPROGRESS)
+		{
+			perror("connect");
+			close(sockfd);
+			return -1;
+		}
+	}
+
+	return sockfd;
 }
 
 ssize_t sock_read(int sockfd, uint8_t *buf, int len)
