@@ -1,11 +1,19 @@
-CC = gcc
-#CFLAGS = -I/usr/include -Og -g
-CFLAGS = -I/usr/include -O3 -flto -march=native -funroll-loops -fomit-frame-pointer -fstrict-aliasing 
-CFLAGS += -Wall -Wextra -Wshadow -Wcast-align
-LDFLAGS = -lssl -lcrypto -flto
-TARGET = main
+DEBUG ?= 0
+
+ifeq ($(DEBUG),1)
+    CFLAGS = -Og -g -DDEBUG
+    LDFLAGS = -lssl -lcrypto
+else
+    CFLAGS = -I/usr/include -O3 -flto -march=native -funroll-loops -fomit-frame-pointer -fstrict-aliasing
+    LDFLAGS = -lssl -lcrypto -flto
+endif
+
+CFLAGS += -Wall -Wextra -Wshadow -Wcast-align -I/usr/include
+
 SRC = main.c blob.c btc.c peer.c netutils.c
 OBJ = $(SRC:.c=.o)
+CC = gcc
+TARGET = main
 
 all: $(TARGET)
 

@@ -345,7 +345,7 @@ int main(int argc, char **argv)
 					blob_t blob;
 					blob.data = pc->buf + pos;
 					blob.len = payload_len + BTC_HDR_SIZE;
-#ifdef DEBUG_DUMP_COMM
+#ifdef DEBUG
 					blob_hexdump(&blob, 0);
 #endif
 					
