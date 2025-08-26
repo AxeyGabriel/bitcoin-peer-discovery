@@ -360,7 +360,6 @@ int main(int argc, char **argv)
 					else if(!strncmp((char *)cmd, "addr", BTC_HDR_CMD_SIZE))
 					{
 						btc_parse_addr(&blob, foreach_new_addr);
-						printf("total peers: %d\n", total_peers);
 						goto closeconn;
 					}
 					else if(!strncmp((char *)cmd, "addrv2", BTC_HDR_CMD_SIZE))
@@ -388,7 +387,7 @@ done:
 
 	if (peers)
 	{
-//		dump_peers_tree(peers);
+		dump_peers_tree(peers);
 		printf("discovered %d peers, made %d conns\n", total_peers, total_connections_made);
 	}
 	else
