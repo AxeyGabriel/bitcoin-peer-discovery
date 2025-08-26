@@ -13,13 +13,11 @@ This software is intended for learning and research on peer-to-peer networks. It
 
 ## Build
 
-```bash
-make
-```
+make 
+or make DEBUG=1 to generate with debug symbols and debug logs
 
 ## Usage
 
-```bash
 ./main [host] [port] [n of peers to discover]
 
 example:
