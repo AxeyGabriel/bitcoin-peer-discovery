@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -I/usr/include -Og
+CFLAGS = -I/usr/include -Og -g
 LDFLAGS = -lssl -lcrypto
 TARGET = main
 SRC = main.c blob.c btc.c peer.c netutils.c

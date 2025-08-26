@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #define PEERS_IPV4_ONLY
+#undef DEBUG_DUMP_COMM
 
 #define SERIALIZE_LE(val, buf) 									\
 	do {														\

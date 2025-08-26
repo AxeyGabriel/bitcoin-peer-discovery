@@ -31,6 +31,7 @@ peer_t *create_peer(struct in6_addr *addr, uint16_t port)
 	p->sockfd = 0;
 	p->flags = 0;
 	p->offset = 0;
+	p->last_command_sent = 0;
 	p->left = NULL;
 	p->right = NULL;
 	return p;

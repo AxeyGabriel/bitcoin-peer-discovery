@@ -19,6 +19,7 @@ typedef struct peer_s
 	int sockfd;
 	int flags;
 	size_t offset;
+	time_t last_command_sent;
 	struct peer_s *left;
 	struct peer_s *right;
 } peer_t;

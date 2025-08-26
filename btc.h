@@ -18,6 +18,6 @@
 blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len);
 blob_t *btc_create_version_payload(void);
 
-int btc_parse_addr(blob_t *buf, peer_t **root);
+int btc_parse_addr(blob_t *buf, void (*cb_foreach_addr)(struct in6_addr *addr, int));
 
 #endif

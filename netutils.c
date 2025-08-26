@@ -104,3 +104,25 @@ void sock_close(int sockfd)
 {
 	close(sockfd);
 }
+
+void in6_addr_port_to_string(struct in6_addr *addr, uint16_t port, char *out, size_t out_len) {
+    char ipstr[INET6_ADDRSTRLEN];
+
+    if (inet_ntop(AF_INET6, addr, ipstr, sizeof(ipstr)) == NULL) {
+        perror("inet_ntop");
+        snprintf(out, out_len, "?:%u", port);
+        return;
+    }
+
+    // For IPv4-mapped IPv6 addresses, you might want to strip ::ffff:
+    // Optional: check if addr is IPv4-mapped
+    if (IN6_IS_ADDR_V4MAPPED(addr)) {
+        struct in_addr ipv4;
+        memcpy(&ipv4, &addr->s6_addr[12], sizeof(ipv4));
+        if (inet_ntop(AF_INET, &ipv4, ipstr, sizeof(ipstr)) == NULL) {
+            perror("inet_ntop");
+        }
+    }
+
+    snprintf(out, out_len, "%s:%u", ipstr, ntohs(port));
+}

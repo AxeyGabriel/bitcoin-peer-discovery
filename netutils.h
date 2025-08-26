@@ -7,6 +7,7 @@ int resolve_names_and_add_peers(char *host, int port, peer_t **root);
 void sock_close(int sockfd);
 ssize_t sock_read(int sockfd, uint8_t *buf, int len);
 int tcp_socket_connect_v4mapped_nb(struct in6_addr *addr, int port);
+void in6_addr_port_to_string(struct in6_addr *addr, uint16_t port, char *out, size_t out_len);
 
 #endif
 
