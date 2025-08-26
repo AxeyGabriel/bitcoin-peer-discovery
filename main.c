@@ -10,7 +10,7 @@
 #include "cJSON.h"
 #include "netutils.h"
 
-#define MAX_FDS 256
+#define MAX_FDS 512
 #define BUFSIZE 32768
 	
 peer_t *peers = NULL;
@@ -28,6 +28,8 @@ uint8_t buf[MAX_FDS][BUFSIZE];
 peer_t *peer_info[MAX_FDS];
 int connected = 0;
 struct pollfd pollfds[MAX_FDS];
+time_t start_time[MAX_FDS];
+
 int nfds = 0;
 unsigned int total_peers = 0;
 unsigned int total_connections_made = 0;
@@ -44,6 +46,7 @@ void connect_to_peer(peer_t *p)
 	pollfds[nfds].events = POLLIN | POLLOUT;
 	pollfds[nfds].revents = 0;
 	peer_info[nfds] = p;
+	start_time[nfds] = time(NULL);
 	p->sockfd = sockfd;
 	p->queried = 1;
 	nfds++;
@@ -127,6 +130,7 @@ void sock_close_decr(int idx)
 	{
 		pollfds[idx] = pollfds[nfds - 1];
 		peer_info[idx] = peer_info[nfds - 1];
+		start_time[idx] = start_time[nfds - 1];
 		memcpy(buf[idx], buf[nfds-1], BUFSIZE);
 	}
 
@@ -221,7 +225,8 @@ int main(int argc, char **argv)
 			}
 
 			time_t now = time(NULL);
-			if (peer->last_command_sent != 0 && now - peer->last_command_sent >= 4)
+			if ((peer->last_command_sent != 0 && now - peer->last_command_sent >= 5)
+				|| (now - start_time[idx] >= 2))
 			{
 				char str[64];
 				in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
