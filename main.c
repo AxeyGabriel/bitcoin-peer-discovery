@@ -18,11 +18,11 @@
 #include "cJSON.h"
 #include "netutils.h"
 
-#define CONN_POOL_SIZE 	8
-#define CONN_QUEUE_SIZE 32
+#define CONN_POOL_SIZE 	32
+#define CONN_QUEUE_SIZE (CONN_POOL_SIZE*3)
 #define BUFSIZE 		32768
-#define POLL_TIME_MS 	1000
-#define PEER_TIMEOUT_SECS 4
+#define POLL_TIME_MS 	100
+#define PEER_TIMEOUT_SECS 10
 	
 typedef struct conn_queue_s {
 	peer_t *peer[CONN_QUEUE_SIZE];
@@ -169,6 +169,7 @@ void close_connection(peer_conn_t *pc, int idx)
 		peer_conn[idx] = peer_conn[conns-1];
 		peer_conn_fd[idx] = peer_conn_fd[conns-1];
 		peer_conn[idx].pfd = &peer_conn_fd[conns-1];
+		//peer_conn[idx].pfd = &peer_conn_fd[idx];
 	}
 
 	conns--;
@@ -181,6 +182,7 @@ int main(int argc, char **argv)
 	char *pa = argv[1];
 	int pp = atoi(argv[2]);
 	npeers = atoi(argv[3]);
+	char str[64];
 	
 	if (argc < 3)
 	{
@@ -238,13 +240,31 @@ int main(int argc, char **argv)
 
 			if (pfd->revents & (POLLERR | POLLHUP | POLLNVAL))
 			{
-				puts("pollerr");
-				close_connection(pc, idx);
-				continue;
+				in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
+				
+				if (pfd->revents & POLLERR)
+				{
+					int err = 0;
+					
+					socklen_t len = sizeof(err);
+					getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+								printf("peer %s:%d: %s\n",
+								str, peer->port, strerror(err));
+				}
+				if (pfd->revents & POLLHUP)
+				{
+					printf("peer %s:%d closed connection\n", str, peer->port);
+				}
+				if (pfd->revents & POLLNVAL)
+				{
+					printf("peer %s:%d panic: fd not open\n", str, peer->port);
+				}
+				goto closeconn;
 			}
 
 			if (pfd->revents & POLLOUT)
 			{
+				/*
 				int err = 0;
 				socklen_t len = sizeof(err);
 				if (getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0)
@@ -253,6 +273,7 @@ int main(int argc, char **argv)
 					close_connection(pc, idx);
 					continue;
 				}
+				*/
 
 				if (!(pc->flags & PEER_FLAG_SENT_VERSION))
 				{
@@ -279,11 +300,9 @@ int main(int argc, char **argv)
 			time_t now = time(NULL);
 			if (now - pc->time >= PEER_TIMEOUT_SECS)
 			{
-				char str[64];
 				in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
 				printf("peer %s timed out\n", str);
-				close_connection(pc, idx);
-				continue;
+				goto closeconn;
 			}
 
 			if (pfd->revents & POLLIN)
@@ -297,8 +316,7 @@ int main(int argc, char **argv)
 					}
 
 					perror("read");
-					close_connection(pc, idx);
-					continue;
+					goto closeconn;
 				}
 
 				pc->offset += n;
@@ -306,6 +324,13 @@ int main(int argc, char **argv)
 				while (pc->offset - pos >= BTC_HDR_SIZE)
 				{
 					uint32_t payload_len = *(uint32_t *)(pc->buf + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
+					if (payload_len > BUFSIZE - BTC_HDR_SIZE)
+					{
+						in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
+						printf("peer %s:%d sent invalid payload size: %d. aborting\n", str, peer->port, payload_len);
+						goto closeconn;
+					}
+
 					if (pc->offset - pos < payload_len + BTC_HDR_SIZE)
 					{
 						break;
@@ -332,9 +357,7 @@ int main(int argc, char **argv)
 					{
 						btc_parse_addr(&blob, foreach_new_addr);
 						printf("total peers: %d\n", total_peers);
-						close_connection(pc, idx);
-						if (idx > 0) idx--;
-						break;
+						goto closeconn;
 					}
 					else if(!strncmp((char *)cmd, "addrv2", BTC_HDR_CMD_SIZE))
 					{
@@ -352,8 +375,12 @@ int main(int argc, char **argv)
 			}
 
 			idx++;
+			goto done;
+closeconn:
+			close_connection(pc, idx);
+done:
 		}
-	} while (total_peers < npeers && conns > 0);
+	} while (total_peers < npeers && (conns || conn_queue.size));
 
 	if (peers)
 	{
