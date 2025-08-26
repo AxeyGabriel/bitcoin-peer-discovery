@@ -15,7 +15,6 @@
 #include "common.h"
 #include "peer.h"
 #include "btc.h"
-#include "cJSON.h"
 #include "netutils.h"
 
 #define CONN_POOL_SIZE 	32
@@ -23,6 +22,12 @@
 #define BUFSIZE 		32768
 #define POLL_TIME_MS 	100
 #define PEER_TIMEOUT_SECS 10
+
+#define PEER_FLAG_GOT_VERSION	(1 << 0)
+#define PEER_FLAG_GOT_VERACK	(1 << 1)
+#define PEER_FLAG_SENT_VERSION	(1 << 2)
+#define PEER_FLAG_SENT_VERACK	(1 << 3)
+#define PEER_FLAG_SENT_GETADDR	(1 << 4)
 	
 typedef struct conn_queue_s {
 	peer_t *peer[CONN_QUEUE_SIZE];
@@ -199,10 +204,9 @@ int main(int argc, char **argv)
  	 * Pre allocate all needed messages
  	 */	
 	blob_t *btc_msg_version_payload = btc_create_version_payload();
-	blob_t *btc_msg_version = btc_create_msg("version",
-			btc_msg_version_payload->data, btc_msg_version_payload->len);
-	blob_t *btc_msg_verack = btc_create_msg("verack", NULL, 0);
-	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
+	blob_t *btc_msg_version = btc_create_msg("version", btc_msg_version_payload);
+	blob_t *btc_msg_verack = btc_create_msg("verack", NULL);
+	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL);
 
 	resolve_names(pa, pp, &foreach_new_addr);
 	
@@ -391,7 +395,11 @@ done:
 	{
 		puts("no peers found");
 	}
-
+	
+	free(btc_msg_version_payload);
+	free(btc_msg_version);
+	free(btc_msg_verack);
+	free(btc_msg_getaddr);
 	
 	return 0;
 }

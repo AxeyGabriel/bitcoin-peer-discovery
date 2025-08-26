@@ -66,8 +66,6 @@ void in6_addr_port_to_string(struct in6_addr *addr, uint16_t port, char *out, si
         return;
     }
 
-    // For IPv4-mapped IPv6 addresses, you might want to strip ::ffff:
-    // Optional: check if addr is IPv4-mapped
     if (IN6_IS_ADDR_V4MAPPED(addr)) {
         struct in_addr ipv4;
         memcpy(&ipv4, &addr->s6_addr[12], sizeof(ipv4));

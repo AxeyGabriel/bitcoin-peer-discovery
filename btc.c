@@ -64,8 +64,10 @@ blob_t *btc_create_version_payload(void)
  * and the payload, already checksummed and ready
  * to be sent
  */
-blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
+blob_t *btc_create_msg(const char *cmd, blob_t *pl)
 {
+	uint8_t *payload = pl ? pl->data : NULL;
+	size_t len = pl ? pl->len : 0;
 	const uint32_t hdr_magic = 0xD9B4BEF9;
 	const int hdr_size = 24;
 	char *empty_str = "";

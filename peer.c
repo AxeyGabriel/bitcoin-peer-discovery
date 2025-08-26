@@ -48,16 +48,6 @@ peer_t *insert_peer(peer_t *root, peer_t *new, uint8_t *duplicated)
 	return root;
 }
 
-void traverse_peers(peer_t *root, peer_callback_t cb)
-{
-	if (!root) return;
-	
-	cb(root);
-	
-	traverse_peers(root->left, cb);
-	traverse_peers(root->right, cb);
-}
-
 void dump_peers_tree(peer_t *root)
 {
     char str[INET6_ADDRSTRLEN];
