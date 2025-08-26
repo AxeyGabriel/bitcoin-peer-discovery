@@ -9,7 +9,7 @@
 static uint64_t hash_peer_info(struct in6_addr *addr, uint16_t port)
 {
 	uint64_t hash = 0;
-	for (int i = 0; i < sizeof(addr->s6_addr); i++)
+	for (size_t i = 0; i < sizeof(addr->s6_addr); i++)
 	{
 		hash *= 31;
 		hash += addr->s6_addr[i];
@@ -27,11 +27,6 @@ peer_t *create_peer(struct in6_addr *addr, uint16_t port)
 	memcpy(p->addr.s6_addr, addr, sizeof(struct in6_addr));
 	p->port = port;
 	p->key = hash_peer_info(addr, port);
-	p->queried = 0;
-	p->sockfd = 0;
-	p->flags = 0;
-	p->offset = 0;
-	p->last_command_sent = 0;
 	p->left = NULL;
 	p->right = NULL;
 	return p;
@@ -65,18 +60,18 @@ void traverse_peers(peer_t *root, peer_callback_t cb)
 
 void dump_peers_tree(peer_t *root)
 {
-    uint8_t str[INET6_ADDRSTRLEN];
+    char str[INET6_ADDRSTRLEN];
 
 	if (!root) return;
 	dump_peers_tree(root->left);
 
 	if (IN6_IS_ADDR_V4MAPPED(&root->addr))
 	{
-		inet_ntop(AF_INET, root->addr.s6_addr + 12, str, sizeof(str));
+		inet_ntop(AF_INET, root->addr.s6_addr + 12, (char *)str, sizeof(str));
 	}
 	else
 	{
-		inet_ntop(AF_INET6, root->addr.s6_addr, str, sizeof(str));
+		inet_ntop(AF_INET6, root->addr.s6_addr, (char *)str, sizeof(str));
 	}
 	
 	printf("peer %016lx: ip %s port %d\n", root->key, str, root->port);

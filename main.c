@@ -3,6 +3,14 @@
 #include <string.h>
 #include <poll.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <errno.h>
 
 #include "common.h"
 #include "peer.h"
@@ -10,89 +18,119 @@
 #include "cJSON.h"
 #include "netutils.h"
 
-#define MAX_FDS 512
-#define BUFSIZE 32768
+#define CONN_POOL_SIZE 	8
+#define CONN_QUEUE_SIZE 32
+#define BUFSIZE 		32768
+#define POLL_TIME_MS 	1000
+#define PEER_TIMEOUT_SECS 4
 	
-peer_t *peers = NULL;
+typedef struct conn_queue_s {
+	peer_t *peer[CONN_QUEUE_SIZE];
+	size_t head;
+	size_t tail;
+	size_t size;
+} conn_queue_t;
 
-typedef struct peer_ll {
+typedef struct peer_conn_s {
 	peer_t *peer;
-	struct peer_ll *next;
-	struct peer_ll *prev;
-} peer_ll_t;
+	uint8_t buf[BUFSIZE];
+	struct pollfd *pfd;
+	time_t time;
+	size_t offset;
+	int flags;
+} peer_conn_t;
 
-peer_ll_t *head = NULL, *tail = NULL;
+conn_queue_t conn_queue;
+peer_conn_t peer_conn[CONN_POOL_SIZE];
+struct pollfd peer_conn_fd[CONN_POOL_SIZE];
+int conns = 0;
 
 int npeers;
-uint8_t buf[MAX_FDS][BUFSIZE];
-peer_t *peer_info[MAX_FDS];
 int connected = 0;
-struct pollfd pollfds[MAX_FDS];
-time_t start_time[MAX_FDS];
+peer_t *peers = NULL;
 
-int nfds = 0;
-unsigned int total_peers = 0;
-unsigned int total_connections_made = 0;
+int total_peers = 0;
+int total_connections_made = 0;
 
-void connect_to_peer(peer_t *p)
+int connect_to_peer(peer_t *p)
 {
-	if (nfds >= MAX_FDS) return;
-	if (p->queried) return;
-	if (p->sockfd > 0) return;
+	if (conns >= CONN_POOL_SIZE)
+	{
+		// No free slots available
+		return -1;
+	}
 
-	int sockfd = tcp_socket_connect_v4mapped_nb(&p->addr, p->port);
+	int sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+	if (sockfd < 0)
+	{
+		perror("socket");
+		return -2;
+	}
 
-	pollfds[nfds].fd = sockfd;
-	pollfds[nfds].events = POLLIN | POLLOUT;
-	pollfds[nfds].revents = 0;
-	peer_info[nfds] = p;
-	start_time[nfds] = time(NULL);
-	p->sockfd = sockfd;
-	p->queried = 1;
-	nfds++;
+	int flags = fcntl(sockfd, F_GETFL, 0);
+	fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+	struct sockaddr_in6 sa6;
+	memset(&sa6, 0, sizeof(sa6));
+	sa6.sin6_family = AF_INET6;
+	sa6.sin6_port = htons(p->port);
+	sa6.sin6_addr = p->addr;
+
+	if (connect(sockfd, (struct sockaddr *)&sa6, sizeof(sa6)) < 0)
+	{
+		if (errno != EINPROGRESS)
+		{
+			perror("connect");
+			close(sockfd);
+			return -3;
+		}
+	}
+
+	peer_conn[conns].pfd = &peer_conn_fd[conns];
+	peer_conn[conns].pfd->fd = sockfd;
+	peer_conn[conns].pfd->events = POLLIN | POLLOUT;
+	peer_conn[conns].pfd->revents = 0;
+	peer_conn[conns].peer = p;
+	peer_conn[conns].time = time(NULL);
+	conns++;
+
 	connected++;
 	total_connections_made++;
 
 	char str[64];
 	in6_addr_port_to_string(&p->addr, htons(p->port), str, sizeof(str));	
-	printf("[%d/%d] connected to %s\n", connected, MAX_FDS, str);
+	printf("[%d/%d] connected to %s\n", connected, CONN_POOL_SIZE, str);
+
+	return 0;
 }
 
-void add_peer_to_ll(peer_t *p)
+peer_t *conn_dequeue(void)
 {
-	peer_ll_t *n = malloc(sizeof(peer_ll_t));
-	n->peer = p;
-	n->next = NULL;
-	n->prev = NULL;
+	if (conn_queue.size == 0) return NULL;
 
-	if (head == NULL)
-	{
-		head = n;
-		tail = n;
-	}
-	else
-	{
-		tail->next = n;
-		n->prev = tail;
-		tail = n;
-	}
+	peer_t *p = conn_queue.peer[conn_queue.tail];
+	conn_queue.tail++;
+	conn_queue.tail %= CONN_QUEUE_SIZE;
+	conn_queue.size--;
+
+	return p;
 }
 
-void del_peer_ll_node(peer_ll_t *pll)
+void conn_enqueue(peer_t *p)
 {
-	if (pll == head)
+	if (conn_queue.size == CONN_QUEUE_SIZE)
 	{
-		head = head->next;
-		if (head) head->prev = NULL;
-		free(pll);
+		conn_queue.tail++;
+		conn_queue.tail %= CONN_QUEUE_SIZE;
+		conn_queue.size--;
 	}
-	else
-	{
-		pll->prev->next = pll->next;
-		pll->next->prev = pll->prev;
-		free(pll);
-	}
+
+	conn_queue.peer[conn_queue.head] = p;
+	conn_queue.head++;
+	conn_queue.head %= CONN_QUEUE_SIZE;
+	conn_queue.size++;
 }
+
 
 void foreach_new_addr(struct in6_addr *addr, int port)
 {
@@ -114,34 +152,32 @@ void foreach_new_addr(struct in6_addr *addr, int port)
 		return;
 	};
 
-	add_peer_to_ll(peer);
+	conn_enqueue(peer);
 	total_peers++;
 }
 
-void sock_close_decr(int idx)
+void close_connection(peer_conn_t *pc, int idx)
 {
 	char str[64];
-	in6_addr_port_to_string(&peer_info[idx]->addr, htons(peer_info[idx]->port), str, sizeof(str));	
-	printf("[%d/%d] disconnected peer %s\n", connected, MAX_FDS, str);
+	in6_addr_port_to_string(&pc->peer->addr, htons(pc->peer->port), str, sizeof(str));	
+	printf("[%d/%d] disconnected peer %s\n", connected, CONN_POOL_SIZE, str);
 	
-	sock_close(pollfds[idx].fd);
+	close(peer_conn_fd[idx].fd);
 	
-	if (idx != nfds-1)
+	if (idx != conns-1)
 	{
-		pollfds[idx] = pollfds[nfds - 1];
-		peer_info[idx] = peer_info[nfds - 1];
-		start_time[idx] = start_time[nfds - 1];
-		memcpy(buf[idx], buf[nfds-1], BUFSIZE);
+		peer_conn[idx] = peer_conn[conns-1];
+		peer_conn_fd[idx] = peer_conn_fd[conns-1];
+		peer_conn[idx].pfd = &peer_conn_fd[conns-1];
 	}
 
-	nfds--;
+	conns--;
 	connected--;
 }
 
 
 int main(int argc, char **argv)
 {
-	int status;
 	char *pa = argv[1];
 	int pp = atoi(argv[2]);
 	npeers = atoi(argv[3]);
@@ -155,6 +191,8 @@ int main(int argc, char **argv)
 	printf("Bitcoin peer discovery poc\n"
 		"using peer \"%s\" as the root peer\n", pa);
 
+	memset(&conn_queue, 0, sizeof(conn_queue));
+
 	/*
  	 * Pre allocate all needed messages
  	 */	
@@ -164,26 +202,27 @@ int main(int argc, char **argv)
 	blob_t *btc_msg_verack = btc_create_msg("verack", NULL, 0);
 	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL, 0);
 
-	resolve_names_and_add_peers(pa, pp, &peers);  	
+	resolve_names(pa, pp, &foreach_new_addr);
 	
-	traverse_peers(peers, add_peer_to_ll);
-	
-	size_t buf_len = sizeof(buf);
-
 	do
 	{
-		peer_ll_t *p = head;
-		while(p)
+		/*
+ 		 * Test if there are pending connections
+ 		 * then connect them if we have free slots
+ 		 */
+		while(conn_queue.size > 0)
 		{
-			peer_ll_t *tmp = p;
-			if (nfds >= MAX_FDS) break;
-			connect_to_peer(p->peer);
-			p = p->next;
-			del_peer_ll_node(tmp);
+			peer_t *p = conn_dequeue();
+			if (!p) break;
+
+			if (connect_to_peer(p) == -1)
+			{
+				conn_enqueue(p);
+				break;
+			}
 		}
 		
-		int ret = poll(pollfds, nfds, 500);
-		int len = sizeof(ret);
+		int ret = poll(peer_conn_fd, conns, POLL_TIME_MS);
 		if (ret < 0)
 		{
 			perror("poll");
@@ -191,97 +230,113 @@ int main(int argc, char **argv)
 		}
 
 		int idx = 0;
-		while (idx < nfds)
+		while (idx < conns)
 		{
-			peer_t *peer = peer_info[idx];
-			if (pollfds[idx].revents & (POLLERR | POLLHUP | POLLNVAL))
+			peer_conn_t *pc = &peer_conn[idx];
+			peer_t *peer = pc->peer;
+			struct pollfd *pfd = pc->pfd;
+
+			if (pfd->revents & (POLLERR | POLLHUP | POLLNVAL))
 			{
-				sock_close_decr(idx);
+				puts("pollerr");
+				close_connection(pc, idx);
 				continue;
 			}
 
-			if (pollfds[idx].revents & POLLOUT)
+			if (pfd->revents & POLLOUT)
 			{
-				if (!(peer->flags & PEER_FLAG_SENT_VERSION))
+				int err = 0;
+				socklen_t len = sizeof(err);
+				if (getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0)
 				{
-					write_blob(peer->sockfd, btc_msg_version);
-					peer->flags |= PEER_FLAG_SENT_VERSION;
-					peer->last_command_sent = time(NULL);
+				    perror("connect failed");
+					close_connection(pc, idx);
+					continue;
 				}
-				else if ((peer->flags & PEER_FLAG_GOT_VERSION)
-					&& !(peer->flags & PEER_FLAG_SENT_VERACK))
+
+				if (!(pc->flags & PEER_FLAG_SENT_VERSION))
 				{
-					write_blob(peer->sockfd, btc_msg_verack);
-					peer->flags |= PEER_FLAG_SENT_VERACK;
-					peer->last_command_sent = time(NULL);
+					write_blob(pfd->fd, btc_msg_version);
+					pc->flags |= PEER_FLAG_SENT_VERSION;
+					pc->time = time(NULL);
 				}
-				else if ((peer->flags & PEER_FLAG_GOT_VERACK)
-					&& !(peer->flags & PEER_FLAG_SENT_GETADDR))
+				else if ((pc->flags & PEER_FLAG_GOT_VERSION)
+					&& !(pc->flags & PEER_FLAG_SENT_VERACK))
 				{
-					write_blob(peer->sockfd, btc_msg_getaddr);
-					peer->flags |= PEER_FLAG_SENT_GETADDR;
-					peer->last_command_sent = time(NULL);
+					write_blob(pfd->fd, btc_msg_verack);
+					pc->flags |= PEER_FLAG_SENT_VERACK;
+					pc->time = time(NULL);
+				}
+				else if ((pc->flags & PEER_FLAG_GOT_VERACK)
+					&& !(pc->flags & PEER_FLAG_SENT_GETADDR))
+				{
+					write_blob(pfd->fd, btc_msg_getaddr);
+					pc->flags |= PEER_FLAG_SENT_GETADDR;
+					pc->time = time(NULL);
 				}
 			}
 
 			time_t now = time(NULL);
-			if ((peer->last_command_sent != 0 && now - peer->last_command_sent >= 5)
-				|| (now - start_time[idx] >= 2))
+			if (now - pc->time >= PEER_TIMEOUT_SECS)
 			{
 				char str[64];
 				in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
 				printf("peer %s timed out\n", str);
-				sock_close_decr(idx);
+				close_connection(pc, idx);
 				continue;
 			}
 
-			if (pollfds[idx].revents & POLLIN)
+			if (pfd->revents & POLLIN)
 			{
-				ssize_t n = sock_read(peer->sockfd, buf[idx] + peer->offset, 1);
-				//ssize_t n = sock_read(peer->sockfd, buf[idx] + peer->offset, buf_len - peer->offset);
+				ssize_t n = read(pfd->fd, pc->buf + pc->offset, BUFSIZE - pc->offset);
 				if (n == -1)
 				{
+					if (errno == EAGAIN || errno == EWOULDBLOCK)
+					{
+						continue;
+					}
+
 					perror("read");
+					close_connection(pc, idx);
 					continue;
 				}
 
-				peer->offset += n;
+				pc->offset += n;
 				size_t pos = 0;
-				while (peer->offset - pos >= BTC_HDR_SIZE)
+				while (pc->offset - pos >= BTC_HDR_SIZE)
 				{
-					uint32_t payload_len = *(uint32_t *)(buf[idx] + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
-					if (peer->offset - pos < payload_len + BTC_HDR_SIZE)
+					uint32_t payload_len = *(uint32_t *)(pc->buf + pos + BTC_HDR_OFFSET_PAYLOAD_SIZE);
+					if (pc->offset - pos < payload_len + BTC_HDR_SIZE)
 					{
 						break;
 					}
 		
-					uint8_t *cmd = buf[idx] + pos + BTC_HDR_OFFSET_CMD;
-					uint8_t *p = buf[idx] + pos + BTC_HDR_SIZE;
+					uint8_t *cmd = pc->buf + pos + BTC_HDR_OFFSET_CMD;
 		
 					blob_t blob;
-					blob.data = buf[idx] + pos;
+					blob.data = pc->buf + pos;
 					blob.len = payload_len + BTC_HDR_SIZE;
 #ifdef DEBUG_DUMP_COMM
 					blob_hexdump(&blob, 0);
 #endif
 					
-					if(!strncmp(cmd, "version", BTC_HDR_CMD_SIZE))
+					if(!strncmp((char *)cmd, "version", BTC_HDR_CMD_SIZE))
 					{
-						peer->flags |= PEER_FLAG_GOT_VERSION;
+						pc->flags |= PEER_FLAG_GOT_VERSION;
 					}
-					else if(!strncmp(cmd, "verack", BTC_HDR_CMD_SIZE))
+					else if(!strncmp((char *)cmd, "verack", BTC_HDR_CMD_SIZE))
 					{
-						peer->flags |= PEER_FLAG_GOT_VERACK;
+						pc->flags |= PEER_FLAG_GOT_VERACK;
 					}
-					else if(!strncmp(cmd, "addr", BTC_HDR_CMD_SIZE))
+					else if(!strncmp((char *)cmd, "addr", BTC_HDR_CMD_SIZE))
 					{
 						btc_parse_addr(&blob, foreach_new_addr);
 						printf("total peers: %d\n", total_peers);
-						sock_close_decr(idx);
+						close_connection(pc, idx);
 						if (idx > 0) idx--;
 						break;
 					}
-					else if(!strncmp(cmd, "addrv2", BTC_HDR_CMD_SIZE))
+					else if(!strncmp((char *)cmd, "addrv2", BTC_HDR_CMD_SIZE))
 					{
 						puts("received addrv2");
 					}
@@ -291,18 +346,18 @@ int main(int argc, char **argv)
 
 				if (pos > 0)
 				{
-					memmove(buf[idx], buf[idx] + pos, peer->offset - pos);
-					peer->offset -= pos;
+					memmove(pc->buf, pc->buf + pos, pc->offset - pos);
+					pc->offset -= pos;
 				}
 			}
 
 			idx++;
 		}
-	} while (total_peers < npeers && nfds > 0);
+	} while (total_peers < npeers && conns > 0);
 
 	if (peers)
 	{
-		dump_peers_tree(peers);
+//		dump_peers_tree(peers);
 		printf("discovered %d peers, made %d conns\n", total_peers, total_connections_made);
 	}
 	else

@@ -15,11 +15,6 @@ typedef struct peer_s
 	struct in6_addr addr;
 	uint16_t port;
 	uint64_t key;
-	uint8_t queried;
-	int sockfd;
-	int flags;
-	size_t offset;
-	time_t last_command_sent;
 	struct peer_s *left;
 	struct peer_s *right;
 } peer_t;

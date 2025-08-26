@@ -12,7 +12,7 @@ int btc_parse_addr(blob_t *buf, void (*cb_foreach_addr)(struct in6_addr *addr, i
 	uint32_t len = buf->len - BTC_HDR_SIZE;
 
 	uint16_t ip_count = payload[0];
-	uint16_t offset = 1;
+	uint32_t offset = 1;
 	uint16_t n_inserted = ip_count;
 
 	if (payload[0] == 0xFD)
@@ -77,7 +77,7 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 	memset(blob->data, 0, blob->len);
 	SERIALIZE_LE((uint32_t)hdr_magic, blob->data + offset);
 	offset += 4;
-	strncpy(blob->data + offset, cmd, strlen(cmd));
+	strncpy((char *)blob->data + offset, cmd, strlen(cmd));
 	offset += 12;
 	SERIALIZE_LE((uint32_t)len, blob->data + offset);
 	offset += 4;
@@ -90,7 +90,7 @@ blob_t *btc_create_msg(const char *cmd, uint8_t *payload, size_t len)
 	}
 	else
 	{
-		btc_calculate_checksum(empty_str, 0, blob->data + offset);
+		btc_calculate_checksum((uint8_t *)empty_str, 0, blob->data + offset);
 	}
 
 	return blob;
