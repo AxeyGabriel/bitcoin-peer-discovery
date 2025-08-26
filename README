@@ -1,1 +1,26 @@
-./main seed.bitcoin.sipa.be 8333 10
+# Bitcoin Peer Crawler
+A simple C program for academic purposes to explore Bitcoin peer discovery.  
+Features asynchronous sockets, a connection pool, and a peer queue.
+
+## Purpose
+
+This software is intended for learning and research on peer-to-peer networks. It demonstrates:
+
+- Resolving hostnames to IPv4 and IPv6 addresses.
+- Maintaining peers in a binary tree indexed by a polynomial rolling hash.
+- Connecting asynchronously to peers using non-blocking sockets.
+- Managing a connection pool and peer queue.
+
+## Build
+
+```bash
+make
+```
+
+## Usage
+
+```bash
+./main [host] [port] [n of peers to discover]
+
+example:
+./main seed.bitcoin.sipa.be 8333 2000
