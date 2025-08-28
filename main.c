@@ -18,11 +18,11 @@
 #include "btc.h"
 #include "netutils.h"
 
-#define CONN_POOL_SIZE 	16
-#define CONN_QUEUE_SIZE (CONN_POOL_SIZE*3)
+#define CONN_POOL_SIZE 	32
+#define CONN_QUEUE_SIZE (512)
 #define BUFSIZE 		0x02000000
 #define POLL_TIME_MS 	100
-#define PEER_TIMEOUT_SECS 10
+#define PEER_TIMEOUT_SECS 2
 
 #define PEER_FLAG_GOT_VERSION	(1 << 0)
 #define PEER_FLAG_GOT_VERACK	(1 << 1)
@@ -31,6 +31,7 @@
 #define PEER_FLAG_SENT_GETADDR	(1 << 4)
 #define PEER_FLAG_EXPECT_DATA	(1 << 5)
 #define PEER_FLAG_IGNORE_DATA	(1 << 6)
+#define PEER_FLAG_CONNECTED		(1 << 7)
 	
 typedef struct conn_queue_s {
 	peer_t *peer[CONN_QUEUE_SIZE];
@@ -42,6 +43,9 @@ typedef struct conn_queue_s {
 typedef struct peer_conn_s {
 	peer_t *peer;
 	uint8_t buf[BUFSIZE];
+	uint8_t txbuf[256];
+	uint16_t txoffset;
+	uint16_t txlen;
 	struct pollfd *pfd;
 	time_t time;
 	size_t offset;
@@ -79,7 +83,7 @@ int connect_to_peer(peer_t *p)
 	sa6.sin6_port = htons(p->port);
 	sa6.sin6_addr = p->addr;
 
-	if (connect(sockfd, (struct sockaddr *)&sa6, sizeof(sa6)) < 0)
+	if (connect(sockfd, (struct sockaddr *)&sa6, sizeof(sa6)) <= 0)
 	{
 		if (errno != EINPROGRESS)
 		{
@@ -89,14 +93,25 @@ int connect_to_peer(peer_t *p)
 		}
 	}
 
-	peer_conn[conns].pfd = &peer_conn_fd[conns];
-	peer_conn[conns].pfd->fd = sockfd;
-	peer_conn[conns].pfd->events = POLLIN | POLLOUT;
-	peer_conn[conns].pfd->revents = 0;
-	peer_conn[conns].peer = p;
-	peer_conn[conns].time = time(NULL);
-	peer_conn[conns].offset = 0;
-	peer_conn[conns].flags = 0;
+	int i;
+	for (i = 0; i < CONN_POOL_SIZE; i++)
+	{
+		if (peer_conn_fd[i].fd == -1)
+		{
+			break;
+		}
+	}
+
+	peer_conn[i].pfd = &peer_conn_fd[i];
+	peer_conn[i].pfd->fd = sockfd;
+	peer_conn[i].pfd->events = POLLIN | POLLOUT;
+	peer_conn[i].pfd->revents = 0;
+	peer_conn[i].peer = p;
+	peer_conn[i].time = time(NULL);
+	peer_conn[i].offset = 0;
+	peer_conn[i].flags = 0;
+	peer_conn[i].txoffset = 0;
+	peer_conn[i].txlen = 0;
 	conns++;
 
 	connected++;
@@ -104,7 +119,7 @@ int connect_to_peer(peer_t *p)
 
 	char str[64];
 	in6_addr_port_to_string(&p->addr, htons(p->port), str, sizeof(str));	
-	printf("[%d/%d] connected to %s\n", connected, CONN_POOL_SIZE, str);
+	printf("[%d/%d] trying to connect to to %s\n", connected, CONN_POOL_SIZE, str);
 
 	return 0;
 }
@@ -168,13 +183,10 @@ void close_connection(peer_conn_t *pc, int idx)
 	printf("[%d/%d] disconnected peer %s\n", connected, CONN_POOL_SIZE, str);
 	
 	close(peer_conn_fd[idx].fd);
-	
-	if (idx != conns-1)
-	{
-		memcpy((void *)&peer_conn[idx], (void *)&peer_conn[conns-1], sizeof(peer_conn_t));
-		memcpy((void *)&peer_conn_fd[idx], (void *)&peer_conn_fd[conns-1], sizeof(struct pollfd));
-	}
 
+	peer_conn[idx].peer = NULL;
+	peer_conn_fd[idx].fd = -1;
+	
 	conns--;
 	connected--;
 }
@@ -207,6 +219,11 @@ int main(int argc, char **argv)
 	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL);
 
 	resolve_names(pa, pp, &foreach_new_addr);
+	
+	for (int i = 0; i < CONN_POOL_SIZE; i++)
+	{
+		peer_conn_fd[i].fd = -1;
+	}
 
 	time_t report = time(NULL);
 
@@ -240,7 +257,7 @@ int main(int argc, char **argv)
 			printf("stats: %d peers; conn_queue size=%ld; connected=%d\n", total_peers, conn_queue.size, connected);
 		}
 		
-		int ret = poll(peer_conn_fd, conns, POLL_TIME_MS);
+		int ret = poll(peer_conn_fd, CONN_POOL_SIZE, POLL_TIME_MS);
 		if (ret < 0)
 		{
 			perror("poll");
@@ -248,11 +265,17 @@ int main(int argc, char **argv)
 		}
 
 		int idx = 0;
-		while (idx < conns)
+		while (idx < CONN_POOL_SIZE)
 		{
 			peer_conn_t *pc = &peer_conn[idx];
 			peer_t *peer = pc->peer;
 			struct pollfd *pfd = pc->pfd;
+
+			if (!peer || pfd->fd == -1)
+			{
+				idx++;
+				continue;
+			}
 
 			if (pfd->revents & (POLLERR | POLLHUP | POLLNVAL))
 			{
@@ -275,40 +298,97 @@ int main(int argc, char **argv)
 				{
 					printf("peer %s panic: fd not open\n", str);
 				}
-				goto closeconn;
+
+				close_connection(pc, idx);
+				idx++;
+				continue;
 			}
 
 			if (pfd->revents & POLLOUT)
 			{
-/*
-				int err = 0;
-				socklen_t len = sizeof(err);
-				if (getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0)
+				if (!(pc->flags & PEER_FLAG_CONNECTED))
 				{
-				    perror("connect failed");
-					//close_connection(pc, idx);
+					int err = 0;
+					socklen_t len = sizeof(err);
+					if (getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
+					{
+					    perror("getsockopt");
+						close_connection(pc, idx);
+						idx++;
+						continue;
+					}
+					if (err == 0)
+					{
+						in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
+						printf("peer %s connected\n", str);
+						pc->flags |= PEER_FLAG_CONNECTED;
+					}
+					else
+					{
+						in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
+						printf("peer %s failed to connect: %s\n", str, strerror(err));
+						close_connection(pc, idx);
+						idx++;
+						continue;
+					}
+				}
+
+				if (!(pc->flags & PEER_FLAG_CONNECTED))
+				{
+					idx++;
 					continue;
 				}
-*/
+
+
 				if (!(pc->flags & PEER_FLAG_SENT_VERSION))
 				{
-					write_blob(pfd->fd, btc_msg_version);
+					memcpy(pc->txbuf, btc_msg_version->data, btc_msg_version->len);
+					pc->txlen = btc_msg_version->len;
 					pc->flags |= PEER_FLAG_SENT_VERSION;
 					pc->time = time(NULL);
 				}
 				else if ((pc->flags & PEER_FLAG_GOT_VERSION)
 					&& !(pc->flags & PEER_FLAG_SENT_VERACK))
 				{
-					write_blob(pfd->fd, btc_msg_verack);
+					memcpy(pc->txbuf, btc_msg_verack->data, btc_msg_verack->len);
+					pc->txlen = btc_msg_verack->len;
 					pc->flags |= PEER_FLAG_SENT_VERACK;
 					pc->time = time(NULL);
 				}
 				else if ((pc->flags & PEER_FLAG_GOT_VERACK)
 					&& !(pc->flags & PEER_FLAG_SENT_GETADDR))
 				{
-					write_blob(pfd->fd, btc_msg_getaddr);
+					memcpy(pc->txbuf, btc_msg_getaddr->data, btc_msg_getaddr->len);
+					pc->txlen = btc_msg_getaddr->len;
 					pc->flags |= PEER_FLAG_SENT_GETADDR;
 					pc->time = time(NULL);
+				}
+
+				if (pc->txlen > 0)
+				{
+					ssize_t n = write(pfd->fd, pc->txbuf + pc->txoffset, pc->txlen - pc->txoffset);
+					if (n > 0)
+					{
+						pc->txoffset += n;
+						if (pc->txoffset == pc->txlen)
+						{
+#ifdef DEBUG
+							blob_t txdata;
+							txdata.data = pc->txbuf;
+							txdata.len = pc->txlen;
+							blob_hexdump(&txdata, 1);
+#endif
+							pc->txoffset = 0;
+							pc->txlen = 0;
+						}
+					}
+					else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+					{
+						perror("write");
+						close_connection(pc, idx);
+						idx++;
+						continue;
+					}
 				}
 			}
 
@@ -317,7 +397,9 @@ int main(int argc, char **argv)
 			{
 				in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
 				printf("peer %s timed out\n", str);
-				goto closeconn;
+				close_connection(pc, idx);
+				idx++;
+				continue;
 			}
 
 			if (pfd->revents & POLLIN)
@@ -341,7 +423,9 @@ int main(int argc, char **argv)
 					}
 
 					perror("read");
-					goto closeconn;
+					close_connection(pc, idx);
+					idx++;
+					continue;
 				}
 				
 				if (n > 0)
@@ -361,7 +445,9 @@ int main(int argc, char **argv)
 							blob.data = pc->buf;
 							blob.len = BTC_HDR_SIZE;
 							blob_hexdump(&blob, 0);
-							goto closeconn;
+							close_connection(pc, idx);
+							idx++;
+							continue;
 						}
 
 						pc->payload_len = payload_len;
@@ -431,7 +517,8 @@ int main(int argc, char **argv)
 						if (pc->flags & PEER_FLAG_SENT_GETADDR)
 						{
 							btc_parse_addr(&blob, foreach_new_addr);
-							goto closeconn;
+							close_connection(pc, idx);
+							idx++;
 						}
 dataend:
 					}
@@ -444,10 +531,6 @@ dataend:
 			}
 
 			idx++;
-			goto done;
-closeconn:
-			close_connection(pc, idx);
-done:
 		}
 	} while (total_peers < npeers && (conns || conn_queue.size));
 
