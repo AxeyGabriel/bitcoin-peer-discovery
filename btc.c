@@ -53,7 +53,7 @@ blob_t *btc_create_version_payload(void)
 	blob->len = BTC_MSG_VERSION_SIZE;
 	memset(blob->data, 0, BTC_MSG_VERSION_SIZE);
 
-	SERIALIZE_LE((uint32_t)70015, blob->data + BTC_VER_OFFSET_VERSION);
+	SERIALIZE_LE((uint32_t)70001, blob->data + BTC_VER_OFFSET_VERSION);
 	SERIALIZE_LE((uint64_t)time(NULL), blob->data + BTC_VER_OFFSET_TIME);
 
 	return blob;
