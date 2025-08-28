@@ -64,7 +64,7 @@ void dump_peers_tree(peer_t *root)
 		inet_ntop(AF_INET6, root->addr.s6_addr, (char *)str, sizeof(str));
 	}
 	
-	printf("peer %016lx: ip %s port %d\n", root->key, str, root->port);
+	printf("peer %016lx: ip %-15s\tport %-5d\n", root->key, str, root->port);
 
 	dump_peers_tree(root->right);
 }

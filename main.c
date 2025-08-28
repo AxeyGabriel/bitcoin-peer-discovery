@@ -18,11 +18,11 @@
 #include "btc.h"
 #include "netutils.h"
 
-#define CONN_POOL_SIZE 	32
-#define CONN_QUEUE_SIZE (512)
+#define CONN_POOL_SIZE 128
+#define CONN_QUEUE_SIZE (65535)
 #define BUFSIZE 		0x02000000
-#define POLL_TIME_MS 	100
-#define PEER_TIMEOUT_SECS 2
+#define POLL_TIME_MS 	10
+#define PEER_TIMEOUT_SECS 5
 
 #define PEER_FLAG_GOT_VERSION	(1 << 0)
 #define PEER_FLAG_GOT_VERACK	(1 << 1)
@@ -116,11 +116,11 @@ int connect_to_peer(peer_t *p)
 
 	connected++;
 	total_connections_made++;
-
+/*
 	char str[64];
 	in6_addr_port_to_string(&p->addr, htons(p->port), str, sizeof(str));	
-	printf("[%d/%d] trying to connect to to %s\n", connected, CONN_POOL_SIZE, str);
-
+	printf("[tryconnect][%d/%d] %s\n", connected, CONN_POOL_SIZE, str);
+*/
 	return 0;
 }
 
@@ -180,7 +180,7 @@ void close_connection(peer_conn_t *pc, int idx)
 {
 	char str[64];
 	in6_addr_port_to_string(&pc->peer->addr, htons(pc->peer->port), str, sizeof(str));	
-	printf("[%d/%d] disconnected peer %s\n", connected, CONN_POOL_SIZE, str);
+	printf("[disconnected][%d/%d] peer %s\n", connected, CONN_POOL_SIZE, str);
 	
 	close(peer_conn_fd[idx].fd);
 
@@ -217,13 +217,14 @@ int main(int argc, char **argv)
 	blob_t *btc_msg_version = btc_create_msg("version", btc_msg_version_payload);
 	blob_t *btc_msg_verack = btc_create_msg("verack", NULL);
 	blob_t *btc_msg_getaddr = btc_create_msg("getaddr", NULL);
-
-	resolve_names(pa, pp, &foreach_new_addr);
 	
 	for (int i = 0; i < CONN_POOL_SIZE; i++)
 	{
 		peer_conn_fd[i].fd = -1;
+		peer_conn[i].peer = NULL;
 	}
+	
+	resolve_names(pa, pp, &foreach_new_addr);
 
 	time_t report = time(NULL);
 
@@ -287,16 +288,16 @@ int main(int argc, char **argv)
 					
 					socklen_t len = sizeof(err);
 					getsockopt(pfd->fd, SOL_SOCKET, SO_ERROR, &err, &len);
-								printf("peer %s: %s\n",
+								printf("[error] peer %s: %s\n",
 								str, strerror(err));
 				}
 				if (pfd->revents & POLLHUP)
 				{
-					printf("peer %s closed connection\n", str);
+					printf("[closed] peer %s closed connection\n", str);
 				}
 				if (pfd->revents & POLLNVAL)
 				{
-					printf("peer %s panic: fd not open\n", str);
+					printf("[crit] peer %s panic: fd not open\n", str);
 				}
 
 				close_connection(pc, idx);
@@ -320,13 +321,13 @@ int main(int argc, char **argv)
 					if (err == 0)
 					{
 						in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
-						printf("peer %s connected\n", str);
+						printf("[connected][%d/%d] peer %s\n", connected, CONN_POOL_SIZE, str);
 						pc->flags |= PEER_FLAG_CONNECTED;
 					}
 					else
 					{
 						in6_addr_port_to_string(&peer->addr, htons(peer->port), str, sizeof(str));	
-						printf("peer %s failed to connect: %s\n", str, strerror(err));
+						printf("[error] peer %s failed to connect: %s\n", str, strerror(err));
 						close_connection(pc, idx);
 						idx++;
 						continue;
@@ -517,6 +518,7 @@ int main(int argc, char **argv)
 						if (pc->flags & PEER_FLAG_SENT_GETADDR)
 						{
 							btc_parse_addr(&blob, foreach_new_addr);
+							printf("stats: %d peers; conn_queue size=%ld; connected=%d\n", total_peers, conn_queue.size, connected);
 							close_connection(pc, idx);
 							idx++;
 						}
@@ -533,6 +535,13 @@ dataend:
 			idx++;
 		}
 	} while (total_peers < npeers && (conns || conn_queue.size));
+
+	for (int i = 0; i < CONN_POOL_SIZE; i++)
+	{
+		if (!peer_conn[i].peer) continue;
+		if (peer_conn[i].pfd->fd == -1) continue;
+		close_connection(&peer_conn[i], i);
+	}
 
 	if (peers)
 	{
