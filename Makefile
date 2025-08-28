@@ -1,14 +1,14 @@
 DEBUG ?= 0
 
 ifeq ($(DEBUG),1)
-    CFLAGS = -Og -g -DDEBUG
+    CFLAGS = -Og -ggdb3 -DDEBUG -no-pie -fno-omit-frame-pointer
     LDFLAGS = -lssl -lcrypto
 else
     CFLAGS = -I/usr/include -O3 -flto -march=native -funroll-loops -fomit-frame-pointer -fstrict-aliasing
     LDFLAGS = -lssl -lcrypto -flto
 endif
 
-CFLAGS += -Wall -Wextra -Wshadow -Wcast-align -I/usr/include
+CFLAGS += -Wall -Wextra -Wshadow -Wcast-align -I/usr/include -mcmodel=large
 
 SRC = main.c blob.c btc.c peer.c netutils.c
 OBJ = $(SRC:.c=.o)
